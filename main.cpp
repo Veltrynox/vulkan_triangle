@@ -30,7 +30,6 @@ private:
 
     void initWindow() {
         glfwInit();
-        // Говорим GLFW не создавать OpenGL контекст
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
         glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 
@@ -38,27 +37,17 @@ private:
     }
 
     vk::raii::PhysicalDevice physicalDevice = nullptr;
+    vk::raii::Device device = nullptr;
+    vk::raii::Queue graphicsQueue = nullptr;
+    vk::raii::SurfaceKHR surface = nullptr;
 
     void initVulkan() {
         createInstance();
         pickPhysicalDevice();
-    }
-
-    void pickPhysicalDevice() {
-        vk::raii::PhysicalDevices devices(instance);
-
-        if (devices.empty()) {
-            throw std::runtime_error("failed to find GPUs with Vulkan support!");
-        }
-
-        physicalDevice = devices[0];
-
-        auto properties = physicalDevice.getProperties();
-        std::cout << "Selected GPU: " << properties.deviceName << std::endl;
+        createLogicalDevice();
     }
 
     void createInstance() {
-        // 1. Описание приложения
         vk::ApplicationInfo appInfo(
             "Hello Triangle",
             VK_MAKE_VERSION(1, 0, 0),
@@ -67,26 +56,21 @@ private:
             VK_API_VERSION_1_3
         );
 
-        // 2. Получаем расширения, нужные для работы GLFW
         uint32_t glfwExtensionCount = 0;
         const char** glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
         std::vector<const char*> extensions(glfwExtensions, glfwExtensions + glfwExtensionCount);
 
-        // ВАЖНО ДЛЯ MACOS: Чтобы Vulkan работал через MoltenVK
         extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
-        // Это расширение нужно, чтобы корректно работали слои отладки в будущем
         extensions.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
 
-        // 3. Настройка создания Instance
         vk::InstanceCreateInfo createInfo(
-            vk::InstanceCreateFlagBits::eEnumeratePortabilityKHR, // Флаг специально для Mac
+            vk::InstanceCreateFlagBits::eEnumeratePortabilityKHR,
             &appInfo,
-            0, nullptr, // Слои (пока пусто)
+            0, nullptr,
             static_cast<uint32_t>(extensions.size()),
             extensions.data()
         );
 
-        // 4. Создание
         try {
             instance = vk::raii::Instance(context, createInfo);
             std::cout << "Vulkan Instance successfully created!" << std::endl;
@@ -95,6 +79,66 @@ private:
         }
     }
 
+    void pickPhysicalDevice() {
+        vk::raii::PhysicalDevices devices(instance);
+        
+        if (devices.empty()) {
+            throw std::runtime_error("failed to find GPUs with Vulkan support!");
+        }
+        
+        physicalDevice = devices[0];
+        
+        auto properties = physicalDevice.getProperties();
+        std::cout << "Selected GPU: " << properties.deviceName << std::endl;
+    }
+
+    void createLogicalDevice() {
+        auto queueFamilies = physicalDevice.getQueueFamilyProperties();
+        
+        int graphicsFamilyIndex = -1;
+        for (int i = 0; i < queueFamilies.size(); i++) {
+            if (queueFamilies[i].queueFlags & vk::QueueFlagBits::eGraphics) {
+                graphicsFamilyIndex = i;
+                break;
+            }
+        }
+
+        if (graphicsFamilyIndex == -1) {
+            throw std::runtime_error("failed to find a graphics queue family!");
+        }
+
+        float queuePriority = 1.0f;
+        vk::DeviceQueueCreateInfo queueCreateInfo(
+            {},
+            static_cast<uint32_t>(graphicsFamilyIndex),
+            1,
+            &queuePriority
+        );
+
+        vk::PhysicalDeviceFeatures deviceFeatures{};
+
+        std::vector<const char*> deviceExtensions;
+        deviceExtensions.push_back("VK_KHR_portability_subset");
+
+        vk::DeviceCreateInfo createInfo(
+            {},
+            queueCreateInfo,
+            {},
+            deviceExtensions,
+            &deviceFeatures
+        );
+
+        try {
+            device = vk::raii::Device(physicalDevice, createInfo);
+            std::cout << "Logical Device successfully created!" << std::endl;
+
+            graphicsQueue = vk::raii::Queue(device, graphicsFamilyIndex, 0);
+        } catch (const std::exception& e) {
+            throw std::runtime_error(std::string("failed to create logical device: ") + e.what());
+        }
+    }
+
+
     void mainLoop() {
         while (!glfwWindowShouldClose(window)) {
             glfwPollEvents();
@@ -102,8 +146,6 @@ private:
     }
 
     void cleanup() {
-        // Благодаря RAII (vk::raii::Instance), инстанс удалится сам.
-        // Нам нужно закрыть только GLFW.
         glfwDestroyWindow(window);
         glfwTerminate();
     }

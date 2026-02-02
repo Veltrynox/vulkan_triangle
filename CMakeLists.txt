@@ -79,7 +79,10 @@ endif()
 # ==============================================================================
 # MAIN EXECUTABLE
 # ==============================================================================
-add_executable(Triangle main.cpp)
+add_executable(Triangle 
+    main.cpp 
+    Texture.cpp
+)
 
 if(ENABLE_CPP20_MODULE)
     target_link_libraries(Triangle PRIVATE Vulkan::cppm glfw)

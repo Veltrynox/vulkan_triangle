@@ -1,4 +1,8 @@
 #define GLFW_INCLUDE_VULKAN
+
+#define GLM_FORCE_DEPTH_ZERO_TO_ONE
+#include <glm/glm.hpp>
+
 #include <GLFW/glfw3.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <chrono>
@@ -6,6 +10,9 @@
 // Texture support
 #include "Texture.h"
 #include <memory>
+
+// Model support
+#include "Model.h"
 
 // Vulkan RAII and Standard Headers
 #if defined(__INTELLISENSE__) || !defined(USE_CPP20_MODULES)
@@ -41,54 +48,23 @@ private:
     // --- 1. CONFIGURATION ---
     const uint32_t WIDTH = 800;
     const uint32_t HEIGHT = 600;
+    static constexpr int INSTANCE_COUNT = 10;
 
     const std::vector<const char*> deviceExtensions = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
         "VK_KHR_portability_subset"
     };
 
-    
+
     // --- 2. STRUCTS ---
     struct SwapChainSupportDetails {
         vk::SurfaceCapabilitiesKHR capabilities;
         std::vector<vk::SurfaceFormatKHR> formats;
         std::vector<vk::PresentModeKHR> presentModes;
     };
-    
-    struct Vertex {
-        glm::vec2 pos;
-        glm::vec3 color;
-        glm::vec2 texCoord; // Add this
-
-        static vk::VertexInputBindingDescription getBindingDescription() {
-            return {0, sizeof(Vertex), vk::VertexInputRate::eVertex};
-        }
-
-        static std::array<vk::VertexInputAttributeDescription, 3> getAttributeDescriptions() {
-            std::array<vk::VertexInputAttributeDescription, 3> attributeDescriptions{};
-
-            attributeDescriptions[0] = {0, 0, vk::Format::eR32G32Sfloat, offsetof(Vertex, pos)};
-            attributeDescriptions[1] = {1, 0, vk::Format::eR32G32B32Sfloat, offsetof(Vertex, color)};
-            attributeDescriptions[2] = {2, 0, vk::Format::eR32G32Sfloat, offsetof(Vertex, texCoord)};
-
-            return attributeDescriptions;
-        }
-    };
-
-    const std::vector<Vertex> vertices = {
-        {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}},
-        {{ 0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
-        {{ 0.5f,  0.5f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}},
-        {{-0.5f,  0.5f}, {1.0f, 1.0f, 1.0f}, {1.0f, 1.0f}}
-    };
-
-    const std::vector<uint16_t> indices = {
-        0, 3, 2,
-        2, 1, 0
-    };
 
     struct UniformBufferObject {
-        alignas(16) glm::mat4 model;
+        alignas(16) glm::mat4 models[INSTANCE_COUNT];
         alignas(16) glm::mat4 view;
         alignas(16) glm::mat4 proj;
     };
@@ -122,11 +98,6 @@ private:
     vk::raii::Semaphore renderFinishedSemaphore = nullptr;
     vk::raii::Fence inFlightFence = nullptr;
 
-    vk::raii::Buffer vertexBuffer = nullptr;
-    vk::raii::DeviceMemory vertexBufferMemory = nullptr;
-    vk::raii::Buffer indexBuffer = nullptr;
-    vk::raii::DeviceMemory indexBufferMemory = nullptr;
-
     vk::raii::DescriptorSetLayout descriptorSetLayout = nullptr;
     vk::raii::DescriptorPool descriptorPool = nullptr;
     vk::raii::DescriptorSets descriptorSets = nullptr;
@@ -135,7 +106,18 @@ private:
     vk::raii::DeviceMemory uniformBufferMemory = nullptr;
     void* uniformBufferMapped = nullptr;
 
+    vk::raii::Image depthImage = nullptr;
+    vk::raii::DeviceMemory depthImageMemory = nullptr;
+    vk::raii::ImageView depthImageView = nullptr;
+    vk::Format depthFormat;
+
     std::unique_ptr<Texture> texture;
+    std::unique_ptr<Model> model;
+
+    vk::SampleCountFlagBits msaaSamples = vk::SampleCountFlagBits::e4;
+    vk::raii::Image colorImage = nullptr;
+    vk::raii::DeviceMemory colorImageMemory = nullptr;
+    vk::raii::ImageView colorImageView = nullptr;
     
     uint32_t graphicsFamilyIndex = 0;
     uint32_t presentFamilyIndex = 0;
@@ -156,16 +138,17 @@ private:
         createLogicalDevice();
         createSwapChain();
         createImageViews();
+        createColorResources();
+        createDepthResources();
         createRenderPass();
         createDescriptorSetLayout();
         createGraphicsPipeline();
         createFramebuffers();
         createCommandPool();
+        model = std::make_unique<Model>(device, physicalDevice, commandPool, graphicsQueue, "models/Cube/Cube.gltf");
         texture = std::make_unique<Texture>(device, physicalDevice, commandPool, graphicsQueue, "textures/texture.jpg");
         createCommandBuffer();
         createSyncObjects();
-        createVertexBuffer();
-        createIndexBuffer();
         createUniformBuffer();
         createDescriptorPool();
         createDescriptorSets();
@@ -285,13 +268,55 @@ private:
         }
     }
 
+    void createColorResources() {
+        vk::Format colorFormat = swapChainImageFormat;
+
+        vk::ImageCreateInfo imageInfo({}, vk::ImageType::e2D, colorFormat, 
+            {swapChainExtent.width, swapChainExtent.height, 1}, 1, 1, 
+            msaaSamples, vk::ImageTiling::eOptimal, 
+            vk::ImageUsageFlagBits::eTransientAttachment | vk::ImageUsageFlagBits::eColorAttachment);
+
+        colorImage = vk::raii::Image(device, imageInfo);
+
+        vk::MemoryRequirements memReq = colorImage.getMemoryRequirements();
+        vk::MemoryAllocateInfo allocInfo(memReq.size, findMemoryType(memReq.memoryTypeBits, vk::MemoryPropertyFlagBits::eDeviceLocal));
+        colorImageMemory = vk::raii::DeviceMemory(device, allocInfo);
+        colorImage.bindMemory(*colorImageMemory, 0);
+
+        vk::ImageViewCreateInfo viewInfo({}, *colorImage, vk::ImageViewType::e2D, colorFormat, {}, {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1});
+        colorImageView = vk::raii::ImageView(device, viewInfo);
+    }
+
     void createRenderPass() {
-        vk::AttachmentDescription colorAttachment({}, swapChainImageFormat, vk::SampleCountFlagBits::e1, vk::AttachmentLoadOp::eClear, vk::AttachmentStoreOp::eStore, vk::AttachmentLoadOp::eDontCare, vk::AttachmentStoreOp::eDontCare, vk::ImageLayout::eUndefined, vk::ImageLayout::ePresentSrcKHR);
+        // 1. Multisampled Color
+        vk::AttachmentDescription colorAttachment({}, swapChainImageFormat, msaaSamples, 
+            vk::AttachmentLoadOp::eClear, vk::AttachmentStoreOp::eStore, 
+            vk::AttachmentLoadOp::eDontCare, vk::AttachmentStoreOp::eDontCare, 
+            vk::ImageLayout::eUndefined, vk::ImageLayout::eColorAttachmentOptimal);
+        // 2. Multisampled Depth
+        vk::AttachmentDescription depthAttachment({}, depthFormat, msaaSamples, 
+            vk::AttachmentLoadOp::eClear, vk::AttachmentStoreOp::eDontCare, 
+            vk::AttachmentLoadOp::eDontCare, vk::AttachmentStoreOp::eDontCare, 
+            vk::ImageLayout::eUndefined, vk::ImageLayout::eDepthStencilAttachmentOptimal);
+        // 3. Resolve Attachment
+        vk::AttachmentDescription colorAttachmentResolve({}, swapChainImageFormat, vk::SampleCountFlagBits::e1, 
+            vk::AttachmentLoadOp::eDontCare, vk::AttachmentStoreOp::eStore, 
+            vk::AttachmentLoadOp::eDontCare, vk::AttachmentStoreOp::eDontCare, 
+            vk::ImageLayout::eUndefined, vk::ImageLayout::ePresentSrcKHR);
+
         vk::AttachmentReference colorRef(0, vk::ImageLayout::eColorAttachmentOptimal);
-        vk::SubpassDescription subpass({}, vk::PipelineBindPoint::eGraphics, 0, nullptr, 1, &colorRef);
-        vk::SubpassDependency dependency(VK_SUBPASS_EXTERNAL, 0, vk::PipelineStageFlagBits::eColorAttachmentOutput, vk::PipelineStageFlagBits::eColorAttachmentOutput, {}, vk::AccessFlagBits::eColorAttachmentWrite);
-        
-        vk::RenderPassCreateInfo renderPassInfo({}, 1, &colorAttachment, 1, &subpass, 1, &dependency);
+        vk::AttachmentReference depthRef(1, vk::ImageLayout::eDepthStencilAttachmentOptimal);
+        vk::AttachmentReference resolveRef(2, vk::ImageLayout::eColorAttachmentOptimal);
+
+        vk::SubpassDescription subpass({}, vk::PipelineBindPoint::eGraphics, 0, nullptr, 1, &colorRef, &resolveRef, &depthRef);
+        std::array<vk::AttachmentDescription, 3> attachments = {colorAttachment, depthAttachment, colorAttachmentResolve};
+
+        vk::SubpassDependency dependency(VK_SUBPASS_EXTERNAL, 0, 
+            vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eEarlyFragmentTests, 
+            vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eEarlyFragmentTests, 
+            {}, vk::AccessFlagBits::eColorAttachmentWrite | vk::AccessFlagBits::eDepthStencilAttachmentWrite);
+
+        vk::RenderPassCreateInfo renderPassInfo({}, static_cast<uint32_t>(attachments.size()), attachments.data(), 1, &subpass, 1, &dependency);
         renderPass = vk::raii::RenderPass(device, renderPassInfo);
     }
 
@@ -364,6 +389,8 @@ private:
         auto bindingDescription = Vertex::getBindingDescription();
         auto attributeDescriptions = Vertex::getAttributeDescriptions();
 
+        vk::PipelineDepthStencilStateCreateInfo depthStencil({}, VK_TRUE, VK_TRUE, vk::CompareOp::eLess, VK_FALSE, VK_FALSE);
+
         vk::PipelineVertexInputStateCreateInfo vertexInputInfo{};
         vertexInputInfo.vertexBindingDescriptionCount = 1;
         vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
@@ -375,22 +402,22 @@ private:
         vk::Rect2D scissor({0, 0}, swapChainExtent);
         vk::PipelineViewportStateCreateInfo viewportState({}, 1, &viewport, 1, &scissor);
         vk::PipelineRasterizationStateCreateInfo rasterizer({}, VK_FALSE, VK_FALSE, vk::PolygonMode::eFill, vk::CullModeFlagBits::eNone, vk::FrontFace::eCounterClockwise, VK_FALSE, 0.0f, 0.0f, 0.0f, 1.0f);
-        vk::PipelineMultisampleStateCreateInfo multisampling({}, vk::SampleCountFlagBits::e1, VK_FALSE);
+        vk::PipelineMultisampleStateCreateInfo multisampling({}, msaaSamples, VK_FALSE);
         vk::PipelineColorBlendAttachmentState colorBlendAttachment(VK_FALSE, vk::BlendFactor::eOne, vk::BlendFactor::eZero, vk::BlendOp::eAdd, vk::BlendFactor::eOne, vk::BlendFactor::eZero, vk::BlendOp::eAdd, vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG | vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA);
         vk::PipelineColorBlendStateCreateInfo colorBlending({}, VK_FALSE, vk::LogicOp::eCopy, 1, &colorBlendAttachment);
         
         vk::PipelineLayoutCreateInfo layoutInfo({}, 1, &*descriptorSetLayout, 0, nullptr);
         pipelineLayout = vk::raii::PipelineLayout(device, layoutInfo);
 
-        vk::GraphicsPipelineCreateInfo pipelineInfo({}, 2, shaderStages, &vertexInputInfo, &inputAssembly, nullptr, &viewportState, &rasterizer, &multisampling, nullptr, &colorBlending, nullptr, *pipelineLayout, *renderPass, 0);
+        vk::GraphicsPipelineCreateInfo pipelineInfo({}, 2, shaderStages, &vertexInputInfo, &inputAssembly, nullptr, &viewportState, &rasterizer, &multisampling, &depthStencil, &colorBlending, nullptr, *pipelineLayout, *renderPass, 0);
         graphicsPipeline = vk::raii::Pipeline(device, nullptr, pipelineInfo);
     }
 
     void createFramebuffers() {
         swapChainFramebuffers.clear();
         for (const auto& view : swapChainImageViews) {
-            vk::ImageView attachments[] = {*view};
-            vk::FramebufferCreateInfo fbInfo({}, *renderPass, 1, attachments, swapChainExtent.width, swapChainExtent.height, 1);
+            std::array<vk::ImageView, 3> attachments = {*colorImageView, *depthImageView, *view};
+            vk::FramebufferCreateInfo fbInfo({}, *renderPass, static_cast<uint32_t>(attachments.size()), attachments.data(), swapChainExtent.width, swapChainExtent.height, 1);
             swapChainFramebuffers.emplace_back(device, fbInfo);
         }
     }
@@ -420,28 +447,30 @@ private:
         device.resetFences(*inFlightFence);
 
         auto [result, imageIndex] = swapChain.acquireNextImage(UINT64_MAX, *imageAvailableSemaphore);
-        
         const auto& commandBuffer = commandBuffers[0];
-        
         updateUniformBuffer();
         
         commandBuffer.reset();
         commandBuffer.begin(vk::CommandBufferBeginInfo{});
 
-        vk::ClearValue clearColor(vk::ClearColorValue(std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f}));
-        vk::RenderPassBeginInfo renderPassInfo(*renderPass, *swapChainFramebuffers[imageIndex], vk::Rect2D({0, 0}, swapChainExtent), 1, &clearColor);
+        std::array<vk::ClearValue, 3> clearValues{};
+        clearValues[0].color = vk::ClearColorValue(std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f});
+        clearValues[1].depthStencil = vk::ClearDepthStencilValue(1.0f, 0);
+        clearValues[2].color = vk::ClearColorValue(std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f});
+
+        vk::RenderPassBeginInfo renderPassInfo(*renderPass, *swapChainFramebuffers[imageIndex], vk::Rect2D({0, 0}, swapChainExtent), static_cast<uint32_t>(clearValues.size()), clearValues.data());
 
         commandBuffer.beginRenderPass(renderPassInfo, vk::SubpassContents::eInline);
         commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, *graphicsPipeline);
 
-        vk::Buffer vertexBuffers[] = {*vertexBuffer};
+        vk::Buffer vertexBuffers[] = {*model->getVertexBuffer()};
         vk::DeviceSize offsets[] = {0};
         
         commandBuffer.bindVertexBuffers(0, vertexBuffers, offsets);
-        commandBuffer.bindIndexBuffer(*indexBuffer, 0, vk::IndexType::eUint16);
+        commandBuffer.bindIndexBuffer(*model->getIndexBuffer(), 0, vk::IndexType::eUint32);
 
         commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, *pipelineLayout, 0, *descriptorSets[0], nullptr);
-        commandBuffer.drawIndexed(static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
+        commandBuffer.drawIndexed(model->getIndexCount(), INSTANCE_COUNT, 0, 0, 0);
         commandBuffer.endRenderPass();
         commandBuffer.end();
 
@@ -515,22 +544,6 @@ private:
         return actual;
     }
 
-    void createBuffer(vk::DeviceSize size, vk::BufferUsageFlags usage, 
-                    vk::MemoryPropertyFlags properties, 
-                    vk::raii::Buffer& buffer, vk::raii::DeviceMemory& bufferMemory) {
-        
-        vk::BufferCreateInfo bufferInfo({}, size, usage, vk::SharingMode::eExclusive);
-        buffer = vk::raii::Buffer(device, bufferInfo);
-
-        vk::MemoryRequirements memRequirements = buffer.getMemoryRequirements();
-
-        vk::MemoryAllocateInfo allocInfo(memRequirements.size, 
-                                        findMemoryType(memRequirements.memoryTypeBits, properties));
-
-        bufferMemory = vk::raii::DeviceMemory(device, allocInfo);
-        buffer.bindMemory(*bufferMemory, 0);
-    }
-
     uint32_t findMemoryType(uint32_t typeFilter, vk::MemoryPropertyFlags properties) {
         vk::PhysicalDeviceMemoryProperties memProperties = physicalDevice.getMemoryProperties();
 
@@ -543,50 +556,18 @@ private:
         throw std::runtime_error("failed to find suitable memory type!");
     }
 
-    void createVertexBuffer() {
-        vk::DeviceSize bufferSize = sizeof(Vertex) * vertices.size();
+    void createBuffer(vk::DeviceSize size, vk::BufferUsageFlags usage, 
+                    vk::MemoryPropertyFlags properties, 
+                    vk::raii::Buffer& buffer, vk::raii::DeviceMemory& bufferMemory) {
+        
+        vk::BufferCreateInfo bufferInfo({}, size, usage, vk::SharingMode::eExclusive);
+        buffer = vk::raii::Buffer(device, bufferInfo);
 
-        // Staging Buffer
-        vk::raii::Buffer stagingBuffer = nullptr;
-        vk::raii::DeviceMemory stagingMemory = nullptr;
-        createBuffer(bufferSize, 
-                    vk::BufferUsageFlagBits::eTransferSrc, 
-                    vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent, 
-                    stagingBuffer, stagingMemory);
+        vk::MemoryRequirements memRequirements = buffer.getMemoryRequirements();
+        vk::MemoryAllocateInfo allocInfo(memRequirements.size, findMemoryType(memRequirements.memoryTypeBits, properties));
 
-        // Copy
-        void* data = stagingMemory.mapMemory(0, bufferSize);
-        memcpy(data, vertices.data(), (size_t)bufferSize);
-        stagingMemory.unmapMemory();
-
-        // Vertex Buffer
-        createBuffer(bufferSize, 
-                    vk::BufferUsageFlagBits::eTransferDst | vk::BufferUsageFlagBits::eVertexBuffer, 
-                    vk::MemoryPropertyFlagBits::eDeviceLocal, 
-                    vertexBuffer, vertexBufferMemory);
-
-        copyBuffer(stagingBuffer, vertexBuffer, bufferSize);
-    }
-
-    void createIndexBuffer() {
-        vk::DeviceSize bufferSize = sizeof(uint16_t) * indices.size();
-
-        vk::raii::Buffer stagingBuffer = nullptr;
-        vk::raii::DeviceMemory stagingMemory = nullptr;
-        createBuffer(bufferSize, vk::BufferUsageFlagBits::eTransferSrc, 
-                    vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent, 
-                    stagingBuffer, stagingMemory);
-
-        void* data = stagingMemory.mapMemory(0, bufferSize);
-        memcpy(data, indices.data(), (size_t)bufferSize);
-        stagingMemory.unmapMemory();
-
-        createBuffer(bufferSize, 
-                    vk::BufferUsageFlagBits::eTransferDst | vk::BufferUsageFlagBits::eIndexBuffer, 
-                    vk::MemoryPropertyFlagBits::eDeviceLocal, 
-                    indexBuffer, indexBufferMemory);
-
-        copyBuffer(stagingBuffer, indexBuffer, bufferSize);
+        bufferMemory = vk::raii::DeviceMemory(device, allocInfo);
+        buffer.bindMemory(*bufferMemory, 0);
     }
 
     void createUniformBuffer() {
@@ -606,31 +587,58 @@ private:
         float time = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - startTime).count();
 
         UniformBufferObject ubo{};
-        ubo.model = glm::rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
-        
-        ubo.view = glm::lookAt(glm::vec3(0.0f, 0.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-        
-        ubo.proj = glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float) swapChainExtent.height, 0.1f, 10.0f);
+
+        for (int i = 0; i < INSTANCE_COUNT; i++) {
+                glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, i * -2.5f, 0.0f));
+                model = glm::rotate(model, time * glm::radians(45.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+                
+                ubo.models[i] = model;
+            }
+
+        ubo.view = glm::lookAt(glm::vec3(5.0f, 5.0f, 5.0f), glm::vec3(0.0f, -10.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+        ubo.proj = glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float) swapChainExtent.height, 0.1f, 100.0f);
         
         ubo.proj[1][1] *= -1;
 
         memcpy(uniformBufferMapped, &ubo, sizeof(ubo));
     }
 
-    void copyBuffer(vk::raii::Buffer& srcBuffer, vk::raii::Buffer& dstBuffer, vk::DeviceSize size) {
-        vk::CommandBufferAllocateInfo allocInfo(*commandPool, vk::CommandBufferLevel::ePrimary, 1);
-        vk::raii::CommandBuffer copyCmd = std::move(device.allocateCommandBuffers(allocInfo).front());
+    vk::Format findDepthFormat() {
+        std::vector<vk::Format> candidates = {
+            vk::Format::eD32Sfloat, 
+            vk::Format::eD32SfloatS8Uint, 
+            vk::Format::eD24UnormS8Uint
+        };
 
-        copyCmd.begin({ vk::CommandBufferUsageFlagBits::eOneTimeSubmit });
+        for (vk::Format format : candidates) {
+            vk::FormatProperties props = physicalDevice.getFormatProperties(format);
+            if ((props.optimalTilingFeatures & vk::FormatFeatureFlagBits::eDepthStencilAttachment) == vk::FormatFeatureFlagBits::eDepthStencilAttachment) {
+                return format;
+            }
+        }
+        throw std::runtime_error("failed to find supported depth format!");
+    }
 
-        vk::BufferCopy copyRegion(0, 0, size);
-        copyCmd.copyBuffer(*srcBuffer, *dstBuffer, copyRegion);
+    void createDepthResources() {
+        depthFormat = findDepthFormat();
 
-        copyCmd.end();
-        
-        vk::SubmitInfo submitInfo({}, {}, *copyCmd, {});
-        graphicsQueue.submit(submitInfo, nullptr);
-        graphicsQueue.waitIdle();
+        // 1. Create the Image
+        vk::ImageCreateInfo imageInfo({}, vk::ImageType::e2D, depthFormat, 
+            {swapChainExtent.width, swapChainExtent.height, 1}, 1, 1, 
+            msaaSamples, vk::ImageTiling::eOptimal, 
+            vk::ImageUsageFlagBits::eDepthStencilAttachment, vk::SharingMode::eExclusive);
+        depthImage = vk::raii::Image(device, imageInfo);
+
+        // Allocate memory
+        vk::MemoryRequirements memReq = depthImage.getMemoryRequirements();
+        vk::MemoryAllocateInfo allocInfo(memReq.size, findMemoryType(memReq.memoryTypeBits, vk::MemoryPropertyFlagBits::eDeviceLocal));
+        depthImageMemory = vk::raii::DeviceMemory(device, allocInfo);
+        depthImage.bindMemory(*depthImageMemory, 0);
+
+        // 2. Create the View
+        vk::ImageViewCreateInfo viewInfo({}, *depthImage, vk::ImageViewType::e2D, depthFormat, {}, 
+            {vk::ImageAspectFlagBits::eDepth, 0, 1, 0, 1});
+        depthImageView = vk::raii::ImageView(device, viewInfo);
     }
 };
 

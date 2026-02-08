@@ -31,13 +31,20 @@ private:
     vk::raii::DeviceMemory imageMemory = nullptr;
     vk::raii::ImageView imageView = nullptr;
     vk::raii::Sampler sampler = nullptr;
+    uint32_t mipLevels = 1;
 
     // Internal Helpers
     uint32_t findMemoryType(const vk::raii::PhysicalDevice& physicalDevice, uint32_t typeFilter, vk::MemoryPropertyFlags properties);
-    
+
     void transitionImageLayout(const vk::raii::Device& device, const vk::raii::CommandPool& commandPool, 
                                const vk::raii::Queue& queue, vk::ImageLayout oldLayout, vk::ImageLayout newLayout);
-    
+
     void copyBufferToImage(const vk::raii::Device& device, const vk::raii::CommandPool& commandPool, 
                            const vk::raii::Queue& queue, vk::Buffer buffer, uint32_t width, uint32_t height);
+
+    void generateMipmaps(const vk::raii::Device& device, const vk::raii::CommandPool& commandPool, 
+                            const vk::raii::Queue& queue, int32_t width, int32_t height);
+
+    vk::raii::CommandBuffer beginSingleTimeCommands(const vk::raii::Device& device, const vk::raii::CommandPool& commandPool);
+    void endSingleTimeCommands(vk::raii::CommandBuffer cb, const vk::raii::Queue& queue);
 };

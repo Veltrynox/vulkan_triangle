@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # ==============================================================================
-# MANUAL VULKAN SETUP
+# VULKAN SETUP
 # ==============================================================================
 
 set(VULKAN_SDK_ROOT "/Volumes/Work/Gamedev/systems/Vulkan/macOS")
@@ -38,6 +38,15 @@ set_target_properties(Vulkan::Vulkan PROPERTIES
 message(STATUS "Vulkan Found Manually: ${Vulkan_LIBRARY}")
 
 # ==============================================================================
+# OPENUSD SETUP 
+# ==============================================================================
+set(USD_ROOT "/Volumes/Work/Gamedev/systems/OpenUSD_Install")
+list(APPEND CMAKE_PREFIX_PATH "${USD_ROOT}")
+find_package(pxr REQUIRED)
+
+message(STATUS "OpenUSD Found at: ${pxr_DIR}")
+
+# ==============================================================================
 # GLFW SETUP
 # ==============================================================================
 include(FetchContent)
@@ -49,13 +58,11 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(glfw)
 
 # ==============================================================================
-# C++20 MODULE SETUP (From your guide)
+# C++20 MODULE SETUP
 # ==============================================================================
 option(ENABLE_CPP20_MODULE "Enable Vulkan C++20 Modules" OFF)
 
 if(ENABLE_CPP20_MODULE)
-    # We don't need find_package(Vulkan) here because we did it manually above
-    
     add_library(VulkanCppModule)
     add_library(Vulkan::cppm ALIAS VulkanCppModule)
 
@@ -82,7 +89,15 @@ endif()
 add_executable(Triangle 
     main.cpp 
     Texture.cpp
+    Model.cpp
 )
+
+target_include_directories(Triangle PRIVATE 
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${PXR_INCLUDE_DIRS}
+)
+
+target_compile_definitions(Triangle PRIVATE ${PXR_CXX_DEFINITIONS})
 
 if(ENABLE_CPP20_MODULE)
     target_link_libraries(Triangle PRIVATE Vulkan::cppm glfw)
@@ -92,6 +107,6 @@ endif()
 
 # macOS RPATH fix so it finds the dylib at runtime
 set_target_properties(Triangle PROPERTIES
-    BUILD_RPATH "${VULKAN_SDK_ROOT}/lib"
-    INSTALL_RPATH "${VULKAN_SDK_ROOT}/lib"
+    BUILD_RPATH "${VULKAN_SDK_ROOT}/lib;${USD_ROOT}/lib"
+    INSTALL_RPATH "${VULKAN_SDK_ROOT}/lib;${USD_ROOT}/lib"
 )

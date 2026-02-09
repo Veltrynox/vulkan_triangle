@@ -14,6 +14,9 @@
 // Model support
 #include "Model.h"
 
+// GUI support
+#include "GuiManager.h"
+
 // Vulkan RAII and Standard Headers
 #if defined(__INTELLISENSE__) || !defined(USE_CPP20_MODULES)
     #include <vulkan/vulkan_raii.hpp>
@@ -118,6 +121,8 @@ private:
     vk::raii::Image colorImage = nullptr;
     vk::raii::DeviceMemory colorImageMemory = nullptr;
     vk::raii::ImageView colorImageView = nullptr;
+
+    std::unique_ptr<GuiManager> gui;
     
     uint32_t graphicsFamilyIndex = 0;
     uint32_t presentFamilyIndex = 0;
@@ -145,13 +150,14 @@ private:
         createGraphicsPipeline();
         createFramebuffers();
         createCommandPool();
-        model = std::make_unique<Model>(device, physicalDevice, commandPool, graphicsQueue, "models/Cube/Cube.gltf");
+        model = std::make_unique<Model>(device, physicalDevice, commandPool, graphicsQueue, "models/USD/sphere.usd");
         texture = std::make_unique<Texture>(device, physicalDevice, commandPool, graphicsQueue, "textures/texture.jpg");
         createCommandBuffer();
         createSyncObjects();
         createUniformBuffer();
         createDescriptorPool();
         createDescriptorSets();
+        init_imgui();
     }
 
     void createInstance() {
@@ -449,7 +455,10 @@ private:
         auto [result, imageIndex] = swapChain.acquireNextImage(UINT64_MAX, *imageAvailableSemaphore);
         const auto& commandBuffer = commandBuffers[0];
         updateUniformBuffer();
-        
+
+        gui->NewFrame();
+        gui->UpdateUI(); 
+
         commandBuffer.reset();
         commandBuffer.begin(vk::CommandBufferBeginInfo{});
 
@@ -471,6 +480,9 @@ private:
 
         commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, *pipelineLayout, 0, *descriptorSets[0], nullptr);
         commandBuffer.drawIndexed(model->getIndexCount(), INSTANCE_COUNT, 0, 0, 0);
+
+        gui->Render(commandBuffer);
+
         commandBuffer.endRenderPass();
         commandBuffer.end();
 
@@ -639,6 +651,10 @@ private:
         vk::ImageViewCreateInfo viewInfo({}, *depthImage, vk::ImageViewType::e2D, depthFormat, {}, 
             {vk::ImageAspectFlagBits::eDepth, 0, 1, 0, 1});
         depthImageView = vk::raii::ImageView(device, viewInfo);
+    }
+
+    void init_imgui() {
+        gui = std::make_unique<GuiManager>(window, instance, physicalDevice, device, graphicsQueue, renderPass, graphicsFamilyIndex, swapChainImages.size());
     }
 };
 

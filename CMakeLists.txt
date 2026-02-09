@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 
 project(Triangle)
 
-# 1. Setup C++ Standard
+# Setup C++ Standard
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -44,6 +44,21 @@ set(USD_ROOT "/Volumes/Work/Gamedev/systems/OpenUSD_Install")
 list(APPEND CMAKE_PREFIX_PATH "${USD_ROOT}")
 find_package(pxr REQUIRED)
 
+set(USD_MANUAL_LIBS
+    "${USD_ROOT}/lib/libusd_usdGeom.dylib"
+    "${USD_ROOT}/lib/libusd_usd.dylib"
+    "${USD_ROOT}/lib/libusd_pcp.dylib"
+    "${USD_ROOT}/lib/libusd_sdf.dylib"
+    "${USD_ROOT}/lib/libusd_vt.dylib"
+    "${USD_ROOT}/lib/libusd_gf.dylib"
+    "${USD_ROOT}/lib/libusd_tf.dylib"
+    "${USD_ROOT}/lib/libusd_plug.dylib"
+    "${USD_ROOT}/lib/libusd_work.dylib"
+    "${USD_ROOT}/lib/libusd_arch.dylib"
+    "${USD_ROOT}/lib/libusd_ar.dylib"
+    "${USD_ROOT}/lib/libtbb.dylib"
+)
+
 message(STATUS "OpenUSD Found at: ${pxr_DIR}")
 
 # ==============================================================================
@@ -56,6 +71,22 @@ FetchContent_Declare(
     GIT_TAG        3.3.8
 )
 FetchContent_MakeAvailable(glfw)
+
+# ==============================================================================
+# IMGUI SETUP
+# ==============================================================================
+FetchContent_Declare(
+    imgui
+    GIT_REPOSITORY https://github.com/ocornut/imgui.git
+)
+FetchContent_MakeAvailable(imgui)
+set(IMGUI_DIR ${imgui_SOURCE_DIR})
+add_library(imgui_backend STATIC
+    ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_vulkan.cpp
+)
+target_include_directories(imgui_backend PUBLIC ${IMGUI_DIR} ${IMGUI_DIR}/backends)
+target_link_libraries(imgui_backend PUBLIC glfw Vulkan::Vulkan)
 
 # ==============================================================================
 # C++20 MODULE SETUP
@@ -90,22 +121,40 @@ add_executable(Triangle
     main.cpp 
     Texture.cpp
     Model.cpp
+    UsdBridge.cpp
+    ${IMGUI_DIR}/imgui.cpp
+    ${IMGUI_DIR}/imgui_draw.cpp
+    ${IMGUI_DIR}/imgui_widgets.cpp
+    ${IMGUI_DIR}/imgui_tables.cpp
+    ${IMGUI_DIR}/imgui_demo.cpp
+    GuiManager.cpp
 )
 
 target_include_directories(Triangle PRIVATE 
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${PXR_INCLUDE_DIRS}
+    ${IMGUI_DIR}
 )
 
 target_compile_definitions(Triangle PRIVATE ${PXR_CXX_DEFINITIONS})
 
 if(ENABLE_CPP20_MODULE)
-    target_link_libraries(Triangle PRIVATE Vulkan::cppm glfw)
+    target_link_libraries(Triangle PRIVATE 
+        Vulkan::cppm 
+        glfw 
+        imgui_backend 
+        ${USD_MANUAL_LIBS}
+    )
 else()
-    target_link_libraries(Triangle PRIVATE Vulkan::Vulkan glfw)
+    target_link_libraries(Triangle PRIVATE 
+        Vulkan::Vulkan 
+        glfw 
+        imgui_backend 
+        ${USD_MANUAL_LIBS}
+    )
 endif()
 
-# macOS RPATH fix so it finds the dylib at runtime
+# macOS RPATH fix
 set_target_properties(Triangle PROPERTIES
     BUILD_RPATH "${VULKAN_SDK_ROOT}/lib;${USD_ROOT}/lib"
     INSTALL_RPATH "${VULKAN_SDK_ROOT}/lib;${USD_ROOT}/lib"

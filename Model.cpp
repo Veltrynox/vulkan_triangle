@@ -1,10 +1,11 @@
 #define TINYGLTF_IMPLEMENTATION
 #define TINYGLTF_NO_STB_IMAGE_WRITE
 
+#include "Model.h"
 #include "stb_image.h"
+#include "UsdBridge.h"
 
 #include "gltf/tiny_gltf.h"
-#include "Model.h"
 #include <iostream>
 
 Model::Model(const vk::raii::Device& device, const vk::raii::PhysicalDevice& physicalDevice, 
@@ -16,6 +17,33 @@ Model::Model(const vk::raii::Device& device, const vk::raii::PhysicalDevice& phy
 }
 
 void Model::loadModel(const std::string& path) {
+    if (path.find(".usd") != std::string::npos || path.find(".usda") != std::string::npos) {
+        std::cout << "Loading USD Asset: " << path << std::endl;
+        
+        UsdMeshResult usdData = UsdBridge::LoadFirstMesh(path);
+        
+        if (!usdData.success) {
+            throw std::runtime_error("Failed to load USD model: " + path);
+        }
+
+        vertices.clear();
+        indices.clear();
+        
+        for (const auto& uv : usdData.vertices) {
+            Vertex v{};
+            v.pos = uv.pos;
+            v.color = glm::vec3(1.0f);
+            v.texCoord = uv.uv;
+            vertices.push_back(v);
+        }
+        indices = usdData.indices;
+
+        std::cout << "Loaded USD Stage: " << path << std::endl;
+
+        return; // Early exit, skipping GLTF logic
+    }
+
+    // --- GLTF Loading Logic ---
     tinygltf::Model gltfModel;
     tinygltf::TinyGLTF loader;
     std::string err, warn;
@@ -72,6 +100,8 @@ void Model::loadModel(const std::string& path) {
 
 void Model::createVertexBuffers(const vk::raii::Device& device, const vk::raii::PhysicalDevice& physicalDevice, const vk::raii::CommandPool& commandPool, const vk::raii::Queue& queue) {
     vk::DeviceSize bufferSize = sizeof(Vertex) * vertices.size();
+    if (bufferSize == 0) return;
+
     vk::raii::Buffer stagingBuffer = nullptr;
     vk::raii::DeviceMemory stagingMemory = nullptr;
 
@@ -87,6 +117,8 @@ void Model::createVertexBuffers(const vk::raii::Device& device, const vk::raii::
 
 void Model::createIndexBuffers(const vk::raii::Device& device, const vk::raii::PhysicalDevice& physicalDevice, const vk::raii::CommandPool& commandPool, const vk::raii::Queue& queue) {
     vk::DeviceSize bufferSize = sizeof(uint32_t) * indices.size();
+    if (bufferSize == 0) return;
+
     vk::raii::Buffer stagingBuffer = nullptr;
     vk::raii::DeviceMemory stagingMemory = nullptr;
 

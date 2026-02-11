@@ -7,6 +7,7 @@
 
 #include "Camera.h"
 #include "GuiManager.h"
+#include "DataProvider.h"
 #include "Splat.h"
 
 // Vulkan RAII and Standard Headers
@@ -140,7 +141,7 @@ private:
     vk::SampleCountFlagBits msaaSamples = vk::SampleCountFlagBits::e4;
 
     std::unique_ptr<GuiManager> gui;
-    std::unique_ptr<SplatCloud> splatCloud;
+    std::unique_ptr<IDataProvider> dataProvider;
     
     // SH
     vk::raii::Buffer shBuffer = nullptr;
@@ -185,11 +186,11 @@ private:
         createDepthResources();
         createRenderPass();
         
-        splatCloud = std::make_unique<SplatCloud>();
-        if(!splatCloud->loadPly("models/Splat/input_image2.ply")) {
+        dataProvider = std::make_unique<SplatCloud>();
+        if(!dynamic_cast<SplatCloud*>(dataProvider.get())->loadPly("models/Splat/input_image2.ply")) {
              throw std::runtime_error("Failed to load PLY!");
         }
-        std::cout << "Loaded: " << splatCloud->GetCount() << std::endl;
+        std::cout << "Loaded: " << dataProvider->GetElementCount() << std::endl;
 
         createDescriptorSetLayout();
         createGraphicsPipeline();
@@ -197,7 +198,7 @@ private:
         createCommandPool();
         
         // Create Buffers
-        createSplatBuffer();
+        createDataBuffers();
         createSortBuffer(); 
         createUniformBuffer();
         
@@ -336,7 +337,7 @@ private:
             {{}, vk::ShaderStageFlagBits::eFragment, *fragModule, "main"}
         };
 
-        vk::PipelineVertexInputStateCreateInfo vertexInput{}; // Empty for splats (data from SSBO)
+        vk::PipelineVertexInputStateCreateInfo vertexInput{};
         vk::PipelineInputAssemblyStateCreateInfo inputAssembly({}, vk::PrimitiveTopology::eTriangleStrip, VK_FALSE);
         vk::Viewport viewport(0.0f, 0.0f, (float)swapChainExtent.width, (float)swapChainExtent.height, 0.0f, 1.0f);
         vk::Rect2D scissor({0, 0}, swapChainExtent);
@@ -374,39 +375,36 @@ private:
     }
 
     // --- BUFFERS ---
-    void createSplatBuffer() {
-        const auto& splats = splatCloud->GetSplats();
-        vk::DeviceSize size = sizeof(GaussianData) * splats.size();
-        
+    void createDataBuffers() {
+        vk::DeviceSize size = dataProvider->GetMainDataSize();
+        if (size == 0) return;
+
         vk::raii::Buffer stagingBuf = nullptr; vk::raii::DeviceMemory stagingMem = nullptr;
         createBuffer(size, vk::BufferUsageFlagBits::eTransferSrc, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent, stagingBuf, stagingMem);
-        
+
         void* data = stagingMem.mapMemory(0, size);
-        memcpy(data, splats.data(), (size_t)size);
+        memcpy(data, dataProvider->GetMainData(), (size_t)size);
         stagingMem.unmapMemory();
 
         createBuffer(size, vk::BufferUsageFlagBits::eTransferDst | vk::BufferUsageFlagBits::eStorageBuffer, vk::MemoryPropertyFlagBits::eDeviceLocal, splatBuffer, splatBufferMemory);
         copyBuffer(device, commandPool, graphicsQueue, *stagingBuf, *splatBuffer, size);
 
-        // SH
-        const auto& shData = splatCloud->GetSHData();
-        if (!shData.empty()) {
-            vk::DeviceSize shSize = sizeof(float) * shData.size();
+        if (dataProvider->HasAuxData()) {
+            vk::DeviceSize auxSize = dataProvider->GetAuxDataSize();
+            vk::raii::Buffer auxStagingBuf = nullptr; vk::raii::DeviceMemory auxStagingMem = nullptr;
+            createBuffer(auxSize, vk::BufferUsageFlagBits::eTransferSrc, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent, auxStagingBuf, auxStagingMem);
 
-            vk::raii::Buffer stagingBuf = nullptr; vk::raii::DeviceMemory stagingMem = nullptr;
-            createBuffer(shSize, vk::BufferUsageFlagBits::eTransferSrc, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent, stagingBuf, stagingMem);
+            void* auxData = auxStagingMem.mapMemory(0, auxSize);
+            memcpy(auxData, dataProvider->GetAuxData(), (size_t)auxSize);
+            auxStagingMem.unmapMemory();
 
-            void* data = stagingMem.mapMemory(0, shSize);
-            memcpy(data, shData.data(), (size_t)shSize);
-            stagingMem.unmapMemory();
-
-            createBuffer(shSize, vk::BufferUsageFlagBits::eTransferDst | vk::BufferUsageFlagBits::eStorageBuffer, vk::MemoryPropertyFlagBits::eDeviceLocal, shBuffer, shBufferMemory);
-            copyBuffer(device, commandPool, graphicsQueue, *stagingBuf, *shBuffer, shSize);
+            createBuffer(auxSize, vk::BufferUsageFlagBits::eTransferDst | vk::BufferUsageFlagBits::eStorageBuffer, vk::MemoryPropertyFlagBits::eDeviceLocal, shBuffer, shBufferMemory);
+            copyBuffer(device, commandPool, graphicsQueue, *auxStagingBuf, *shBuffer, auxSize);
         }
     }
 
     void createSortBuffer() {
-        size_t count = splatCloud->GetCount();
+        size_t count = dataProvider->GetElementCount();
         vk::DeviceSize size = sizeof(uint32_t) * count;
         hostSortIndices.resize(count);
         sortProxies.resize(count);
@@ -431,33 +429,17 @@ private:
         vk::DescriptorBufferInfo uboInfo(*uniformBuffer, 0, sizeof(UniformBufferObject));
         vk::DescriptorBufferInfo splatInfo(*splatBuffer, 0, VK_WHOLE_SIZE);
         vk::DescriptorBufferInfo sortInfo(*sortBuffer, 0, VK_WHOLE_SIZE);
-        vk::DescriptorBufferInfo shInfo(*shBuffer, 0, VK_WHOLE_SIZE);
 
-        std::array<vk::WriteDescriptorSet, 4> writes{};
+        std::vector<vk::WriteDescriptorSet> writes;
         
-        writes[0].dstSet = *descriptorSets[0];
-        writes[0].dstBinding = 0;
-        writes[0].descriptorCount = 1;
-        writes[0].descriptorType = vk::DescriptorType::eUniformBuffer;
-        writes[0].pBufferInfo = &uboInfo;
+        writes.push_back({*descriptorSets[0], 0, 0, 1, vk::DescriptorType::eUniformBuffer, nullptr, &uboInfo});
+        writes.push_back({*descriptorSets[0], 1, 0, 1, vk::DescriptorType::eStorageBuffer, nullptr, &splatInfo});
+        writes.push_back({*descriptorSets[0], 2, 0, 1, vk::DescriptorType::eStorageBuffer, nullptr, &sortInfo});
 
-        writes[1].dstSet = *descriptorSets[0];
-        writes[1].dstBinding = 1;
-        writes[1].descriptorCount = 1;
-        writes[1].descriptorType = vk::DescriptorType::eStorageBuffer;
-        writes[1].pBufferInfo = &splatInfo;
-
-        writes[2].dstSet = *descriptorSets[0];
-        writes[2].dstBinding = 2;
-        writes[2].descriptorCount = 1;
-        writes[2].descriptorType = vk::DescriptorType::eStorageBuffer;
-        writes[2].pBufferInfo = &sortInfo;
-
-        writes[3].dstSet = *descriptorSets[0];
-        writes[3].dstBinding = 3;
-        writes[3].descriptorCount = 1;
-        writes[3].descriptorType = vk::DescriptorType::eStorageBuffer;
-        writes[3].pBufferInfo = &shInfo;
+        if (dataProvider->HasAuxData()) {
+            vk::DescriptorBufferInfo shInfo(*shBuffer, 0, VK_WHOLE_SIZE);
+            writes.push_back({*descriptorSets[0], 3, 0, 1, vk::DescriptorType::eStorageBuffer, nullptr, &shInfo});
+        }
 
         device.updateDescriptorSets(writes, nullptr);
     }
@@ -470,12 +452,15 @@ private:
 
     // --- LOGIC ---
     void sortSplats() {
+        SplatCloud* cloud = dynamic_cast<SplatCloud*>(dataProvider.get());
+        if (!cloud) return;
+
         glm::vec3 camDir = camera.Front;
-        const auto& splats = splatCloud->GetSplats();
+        const auto& splats = cloud->GetSplats();
         size_t count = splats.size();
 
         for (size_t i = 0; i < count; i++) {
-            sortProxies[i].index = i;
+            sortProxies[i].index = (uint32_t)i;
             sortProxies[i].depth = glm::dot(glm::vec3(splats[i].pos_opacity), camDir);
         }
 
@@ -575,7 +560,7 @@ private:
         
         // Draw Splats
         commandBuffers[0].bindDescriptorSets(vk::PipelineBindPoint::eGraphics, *pipelineLayout, 0, {*descriptorSets[0]}, nullptr);
-        commandBuffers[0].draw(4, splatCloud->GetCount(), 0, 0); // 4 vertices per quad instanced
+        commandBuffers[0].draw(4, dataProvider->GetElementCount(), 0, 0);
 
         gui->Render(commandBuffers[0]);
         commandBuffers[0].endRenderPass();
